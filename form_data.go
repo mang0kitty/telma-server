@@ -178,5 +178,6 @@ func main() {
 		fmt.Fprintf(w, "The number of words is %d (%s)", wordCount, word)
 	})
 
+	fmt.Println("Starting Telma Server")
 	http.ListenAndServe(":5000", mux)
 }
