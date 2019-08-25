@@ -1,50 +1,149 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 )
 
-type InputFile interface {
-	io.ReadSeeker
+type ReadSeekerAt interface {
 	io.ReaderAt
+	io.Seeker
 }
 
-func WordCountParallel(input InputFile) {
-	length, _ := input.Seek(0, io.SeekEnd)
+func WordCountParallel(file ReadSeekerAt) (int64, string) {
+	length, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		fmt.Printf("Error getting length of file")
+		return -1, err.Error()
+	}
 
 	partLength := length / 10
 
-	sectionReaders := make([]*io.SectionReader, 10)
+	ch := make(chan string)
+	done := make(chan struct{})
+
 	for i := int64(0); i < 10; i++ {
-		sectionReaders[i] = io.NewSectionReader(input, partLength*i, partLength)
+		start := partLength * i
+		end := partLength * (i + 1)
+
+		if i == 9 {
+			end = length
+		}
+
+		go WordCountPartial(file, start, end, ch, done)
 	}
 
-	for i := 0; i < 10; i++ {
-		go func(i int) {
-			count := WordCount(sectionReaders[i])
-			fmt.Println("count = ", count)
-		}(i)
+	go func() {
+		for i := 0; i < 10; i++ {
+			<-done
+		}
+
+		close(ch)
+	}()
+
+	return reduce(ch)
+}
+
+func isWhitespace(r byte) bool {
+	switch r {
+	case ' ':
+		return true
+	case '\n':
+		return true
+	case '\r':
+		return true
+	default:
+		return false
 	}
 }
 
-func WordCount(input io.Reader) int {
-	scanner := bufio.NewScanner(input)
-	scanner.Split(bufio.ScanWords)
+func WordCountPartial(input io.ReaderAt, start int64, end int64, output chan<- string, done chan<- struct{}) {
+	defer func() {
+		done <- struct{}{}
+	}()
 
-	count := 0
-	for scanner.Scan() {
-		count++
+	buffer := make([]byte, 100)
+	bufferFill := 0
+	word := ""
+
+	isEOF := false
+
+	inWord := false
+	snoozing := start != 0
+
+	for i, j := start, 0; ; {
+		if snoozing && i == end {
+			break
+		}
+
+		if !inWord && i > end {
+			break
+		}
+
+		if j == bufferFill {
+			if isEOF {
+				break
+			}
+
+			j = 0
+			nread, err := input.ReadAt(buffer, i)
+			if nread == 0 {
+				break
+			}
+
+			if err == io.EOF {
+				isEOF = true
+			} else if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			bufferFill = nread
+		}
+
+		if isWhitespace(buffer[j]) {
+			inWord = false
+			if word != "" {
+				output <- word
+				word = ""
+			}
+
+			if snoozing {
+				snoozing = false
+			}
+		} else if !snoozing && !inWord {
+			inWord = true
+		}
+
+		if inWord {
+			word = word + string(buffer[j])
+		}
+
+		i++
+		j++
 	}
 
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "reading input:", err)
+	if word != "" {
+		output <- word
+	}
+}
+
+func reduce(ch <-chan string) (int64, string) {
+	frequency := map[string]int64{}
+	max := int64(0)
+	maxString := ""
+
+	for word := range ch {
+		fmt.Printf("word %s\n", word)
+		frequency[word] = frequency[word] + 1
+		if frequency[word] > max {
+			max = frequency[word]
+			maxString = word
+		}
 	}
 
-	return count
+	return max, maxString
 }
 
 func main() {
@@ -74,9 +173,9 @@ func main() {
 
 		defer file.Close()
 
-		wordCount := WordCount(file)
+		wordCount, word := WordCountParallel(file)
 
-		fmt.Fprintf(w, "The number of words is %d", wordCount)
+		fmt.Fprintf(w, "The number of words is %d (%s)", wordCount, word)
 	})
 
 	http.ListenAndServe(":5000", mux)
